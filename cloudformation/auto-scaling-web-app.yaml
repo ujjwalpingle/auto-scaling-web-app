@@ -1,0 +1,162 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Auto Scaling Web Application on AWS
+
+Resources:
+  # Create a VPC for networking
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: "10.0.0.0/16"
+      EnableDnsSupport: "true"
+      EnableDnsHostnames: "true"
+      Tags:
+        - Key: Name
+          Value: AutoScalingVPC
+
+  # Create a subnet within the VPC
+  Subnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: "10.0.1.0/24"
+      AvailabilityZone: "us-west-2a"
+      MapPublicIpOnLaunch: "true"
+      Tags:
+        - Key: Name
+          Value: AutoScalingSubnet
+
+  # Internet Gateway for external access
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: AutoScalingIGW
+
+  # Attach Internet Gateway to the VPC
+  AttachInternetGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Security Group for instances (allow SSH and HTTP)
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable SSH and HTTP access
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - CidrIp: "0.0.0.0/0"
+          IpProtocol: "-1"
+      SecurityGroupIngress:
+        - IpProtocol: "tcp"
+          FromPort: "22"
+          ToPort: "22"
+          CidrIp: "0.0.0.0/0"  # SSH access (adjust as needed)
+        - IpProtocol: "tcp"
+          FromPort: "80"
+          ToPort: "80"
+          CidrIp: "0.0.0.0/0"  # HTTP access
+
+  # Launch Configuration for Auto Scaling
+  LaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: "ami-0c55b159cbfafe1f0"  # Replace with your AMI ID
+      InstanceType: "t2.micro"
+      SecurityGroups:
+        - !Ref InstanceSecurityGroup
+      KeyName: "my-key-pair"  # Replace with your SSH key pair name
+      UserData: !Sub |
+        #!/bin/bash
+        yum update -y
+        yum install -y httpd
+        service httpd start
+        chkconfig httpd on
+
+  # Auto Scaling Group
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AvailabilityZones:
+        - "us-west-2a"
+      DesiredCapacity: 2
+      MinSize: 1
+      MaxSize: 5
+      LaunchConfigurationName: !Ref LaunchConfig
+      VPCZoneIdentifier:
+        - !Ref Subnet
+      HealthCheckType: EC2
+      HealthCheckGracePeriod: 300
+      Tags:
+        - Key: Name
+          Value: AutoScalingInstance
+          PropagateAtLaunch: "true"
+
+  # Load Balancer setup
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: "AutoScaling-LoadBalancer"
+      Subnets:
+        - !Ref Subnet
+      SecurityGroups:
+        - !Ref InstanceSecurityGroup
+      Scheme: "internet-facing"
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "60"
+
+  # Target Group
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VPC
+      Protocol: HTTP
+      Port: 80
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: "/"
+      TargetType: instance
+
+  # Listener for Load Balancer
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: 200
+            ContentType: text/plain
+            MessageBody: "Healthy"
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  # CloudWatch Alarm for CPU utilization
+  CpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "Alarm when CPU exceeds 70%"
+      Namespace: "AWS/EC2"
+      MetricName: "CPUUtilization"
+      Dimensions:
+        - Name: "AutoScalingGroupName"
+          Value: !Ref AutoScalingGroup
+      Statistic: "Average"
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 70
+      ComparisonOperator: "GreaterThanThreshold"
+      AlarmActions:
+        - Ref: ScalingPolicy
+
+  # Scaling Policy to scale out when alarm triggers
+  ScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      ScalingAdjustment: 1
+      AdjustmentType: ChangeInCapacity
+      CoolDown: 300
+  
